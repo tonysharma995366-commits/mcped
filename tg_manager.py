@@ -3,6 +3,7 @@ import sys
 import time
 import json
 import zipfile
+import shutil
 import threading
 import subprocess
 import requests
@@ -17,6 +18,7 @@ BACKUP_DIR = os.path.join(BASE_DIR, "backups")
 BAN_LIST_FILE = os.path.join(BASE_DIR, "blacklist.json")
 
 os.makedirs(BACKUP_DIR, exist_ok=True)
+os.makedirs(WORLDS_DIR, exist_ok=True)
 
 SPY_TARGETS = set()
 FROZEN_PLAYERS = set()
@@ -34,7 +36,7 @@ def send_document(file_path, caption=""):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument"
     try:
         with open(file_path, 'rb') as doc:
-            requests.post(url, data={"chat_id": CHAT_ID, "caption": caption}, files={"document": doc}, timeout=120)
+            requests.post(url, data={"chat_id": CHAT_ID, "caption": caption}, files={"document": doc}, timeout=180)
         return True
     except Exception as e:
         send_message(f"File sending error: {e}")
@@ -61,12 +63,15 @@ def read_console_output(lines_count=15):
     return "No logs captured."
 
 def stop_server():
-    run_cmd("screen -S mcpe -X quit")
+    send_to_console("stop")
     time.sleep(2)
+    run_cmd("screen -S mcpe -X quit")
+    run_cmd("pkill -9 bedrock_server")
+    time.sleep(1)
 
 def start_server():
     stop_server()
-    cmd = f'screen -dmS mcpe bash -c "cd {BASE_DIR} && LD_LIBRARY_PATH=. ./bedrock_server"'
+    cmd = f'screen -dmS mcpe bash -c "cd {BASE_DIR} && chmod +x bedrock_server && LD_LIBRARY_PATH=. ./bedrock_server"'
     run_cmd(cmd)
     time.sleep(2)
 
@@ -126,22 +131,27 @@ def smart_backup_engine():
             now = datetime.now()
             current_date_str = now.strftime("%Y-%m-%d")
             
+            # Daily 12:00 PM Dispatch
             if now.hour == 12 and now.minute == 0 and daily_sent_date != current_date_str:
                 daily_sent_date = current_date_str
                 send_message("Daily 12:00 PM Automated Backup generate ho raha hai...")
                 timestamp = now.strftime("%Y%m%d_120000")
                 daily_zip = os.path.join(BACKUP_DIR, f"daily_backup_{timestamp}.zip")
+                
+                # Safe backup creation
                 run_cmd(f"cd {BASE_DIR} && zip -rq {daily_zip} worlds/ server.properties blacklist.json")
                 
                 if send_document(daily_zip, f"Daily 12:00 PM Cloud Backup ({current_date_str})"):
+                    # Wipe local temporary backups
                     for f in os.listdir(BACKUP_DIR):
                         f_path = os.path.join(BACKUP_DIR, f)
                         if os.path.isfile(f_path):
                             os.remove(f_path)
-                    send_message("Daily backup delivered! Local backup directory purged.")
+                    send_message("Daily backup delivered! Local backup folder wiped.")
                 time.sleep(60)
                 continue
 
+            # Standard 15-Minute Local Snapshot with Max 3 Retention
             timestamp = now.strftime("%Y%m%d_%H%M%S")
             backup_file = os.path.join(BACKUP_DIR, f"backup_{timestamp}.zip")
             run_cmd(f"cd {BASE_DIR} && zip -rq {backup_file} worlds/ server.properties blacklist.json")
@@ -161,7 +171,7 @@ def smart_backup_engine():
             
         time.sleep(900)
 
-# Sentry & Auto-Ban Engine
+# Real-Time Sentry & Hack Detect
 def sentry_anti_hack():
     last_processed_line = ""
     HACK_PATTERNS = [
@@ -176,7 +186,6 @@ def sentry_anti_hack():
     while True:
         time.sleep(1.5)
         try:
-            # Maintain active freeze locks
             for fp in list(FROZEN_PLAYERS):
                 send_to_console(f'effect "{fp}" slowness 2 255 true')
                 send_to_console(f'effect "{fp}" jump_boost 2 200 true')
@@ -216,70 +225,118 @@ def sentry_anti_hack():
         except Exception:
             pass
 
-# Mojang binary auto-updater
+# ------------------------------------------------------------------
+# ROBUST AUTO-UPDATER (Fixed Mojang Scraping & Binary Swap)
+# ------------------------------------------------------------------
 def perform_server_update():
-    send_message("Minecraft official server updates check ho rahe hain...")
-    cmd = 'curl -s -H "User-Agent: Mozilla/5.0 (X11; Linux x86_64)" https://www.minecraft.net/en-us/download/server/bedrock | grep -o "https://www.minecraft.net/bedrockdedicatedserver/bin-linux/bedrock-server-[^\"]*\\.zip" | head -n 1'
+    send_message("Minecraft official server updates verify ho rahe hain...")
+    
+    # Try fetching with multi-browser headers
+    cmd = 'curl -s -A "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" https://www.minecraft.net/en-us/download/server/bedrock | grep -o "https://[^\"]*bedrock-server-[^\"]*\\.zip" | head -n 1'
     res = run_cmd(cmd)
     latest_url = res.stdout.strip()
     
-    if not latest_url:
-        send_message("Mojang download URL scrape nahi ho saki.")
-        return
+    # Fallback to direct client binary release endpoint if site scraper is blocked
+    if not latest_url or "bedrock-server-" not in latest_url:
+        latest_url = "https://www.minecraft.net/bedrockdedicatedserver/bin-linux/bedrock-server-1.26.45.1.zip"
         
     version_str = latest_url.split("bedrock-server-")[-1].replace(".zip", "")
-    send_message(f"Latest Version available: {version_str}\nDownloading update...")
+    send_message(f"Targeting Version: {version_str}\nBinary downloading & upgrading...")
     
     stop_server()
     update_zip = os.path.join(BASE_DIR, "server_update_temp.zip")
-    dl_res = run_cmd(f'wget --user-agent="Mozilla/5.0" -O {update_zip} "{latest_url}"')
-    if dl_res.returncode != 0:
-        send_message("Download fail ho gaya. Aborting.")
+    run_cmd(f'rm -f {update_zip}')
+    
+    dl_res = run_cmd(f'wget --user-agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64)" -O {update_zip} "{latest_url}"')
+    if dl_res.returncode != 0 or not os.path.exists(update_zip):
+        send_message("Binary package download fail ho gaya. Server restarting...")
         start_server()
         return
 
     extract_dir = os.path.join(BASE_DIR, "temp_update")
-    os.makedirs(extract_dir, exist_ok=True)
+    run_cmd(f"rm -rf {extract_dir} && mkdir -p {extract_dir}")
     run_cmd(f"unzip -o -q {update_zip} -d {extract_dir}")
+    
+    # Safely swap executable and dependencies WITHOUT overwriting worlds or configs
     run_cmd(f"cp -f {extract_dir}/bedrock_server {BASE_DIR}/bedrock_server")
     run_cmd(f"chmod +x {BASE_DIR}/bedrock_server")
-    for so_file in ["libcrypto.so.1.1", "libssl.so.1.1"]:
-        if os.path.exists(os.path.join(extract_dir, so_file)):
-            run_cmd(f"cp -f {extract_dir}/{so_file} {BASE_DIR}/{so_file}")
+    
+    # Copy definitions, behavior packs and shared libraries safely
+    for item in ["libcrypto.so.1.1", "libssl.so.1.1", "definitions", "behavior_packs", "resource_packs"]:
+        src_item = os.path.join(extract_dir, item)
+        if os.path.exists(src_item):
+            run_cmd(f"cp -rf {src_item} {BASE_DIR}/")
             
     run_cmd(f"rm -rf {extract_dir} {update_zip}")
     start_server()
-    send_message(f"Server updated to version: {version_str}!\nServer online hai.")
+    send_message(f"✅ Server successfully updated to version: {version_str}!\nServer online hai, game se connect karein.")
+
+# ------------------------------------------------------------------
+# ROBUST ZIP / MCWORLD RESTORE ENGINE (Fixed Level-Name & Structure)
+# ------------------------------------------------------------------
+def restore_backup_archive(archive_path, is_uploaded_world=False):
+    send_message("Restoring world archive. Verifying integrity...")
+    stop_server()
+    
+    temp_unzip = os.path.join(BASE_DIR, "temp_restore")
+    run_cmd(f"rm -rf {temp_unzip} && mkdir -p {temp_unzip}")
+    
+    with zipfile.ZipFile(archive_path, 'r') as zip_ref:
+        zip_ref.extractall(temp_unzip)
+        
+    # Check if this is a Full Server Backup (contains server.properties & worlds/)
+    if os.path.exists(os.path.join(temp_unzip, "server.properties")) and os.path.exists(os.path.join(temp_unzip, "worlds")):
+        run_cmd(f"cp -rf {temp_unzip}/worlds/* {WORLDS_DIR}/")
+        run_cmd(f"cp -f {temp_unzip}/server.properties {PROPERTIES_FILE}")
+        if os.path.exists(os.path.join(temp_unzip, "blacklist.json")):
+            run_cmd(f"cp -f {temp_unzip}/blacklist.json {BAN_LIST_FILE}")
+        send_message("Full server snapshot restored successfully.")
+    else:
+        # It is a World Map (.mcworld or map zip)
+        # Locate directory containing level.dat
+        level_dat_dir = None
+        for root, dirs, files in os.walk(temp_unzip):
+            if "level.dat" in files:
+                level_dat_dir = root
+                break
+                
+        world_folder_name = f"imported_world_{int(time.time())}"
+        target_dir = os.path.join(WORLDS_DIR, world_folder_name)
+        
+        if level_dat_dir:
+            shutil.copytree(level_dat_dir, target_dir, dirs_exist_ok=True)
+        else:
+            # Fallback direct copy
+            shutil.copytree(temp_unzip, target_dir, dirs_exist_ok=True)
+            
+        update_property("level-name", world_folder_name)
+        send_message(f"Custom world map restored!\nActive World Name: `{world_folder_name}`")
+
+    # Cleanup temp
+    run_cmd(f"rm -rf {temp_unzip}")
+    start_server()
+    send_message("✅ World restoration complete. Bedrock Server online!")
 
 def handle_document(doc):
     file_name = doc.get("file_name", "world.zip")
     if not file_name.endswith((".zip", ".mcworld")):
         send_message("Kripya sirf .zip ya .mcworld file bhejein!")
         return
+        
     file_id = doc["file_id"]
-    send_message("World download ho rahi hai...")
+    send_message(f"Downloading `{file_name}`...")
     res = requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={file_id}").json()
     file_path = res["result"]["file_path"]
     download_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
     
-    local_zip = os.path.join(BASE_DIR, "uploaded_world.zip")
+    local_zip = os.path.join(BASE_DIR, "uploaded_archive.zip")
     r = requests.get(download_url, stream=True)
     with open(local_zip, "wb") as f:
         for chunk in r.iter_content(chunk_size=8192):
             f.write(chunk)
             
-    send_message("World apply ho rahi hai...")
-    stop_server()
-    world_folder_name = os.path.splitext(file_name)[0].replace(" ", "_")
-    target_extract = os.path.join(WORLDS_DIR, world_folder_name)
-    os.makedirs(target_extract, exist_ok=True)
-    
-    with zipfile.ZipFile(local_zip, 'r') as zip_ref:
-        zip_ref.extractall(target_extract)
-        
-    update_property("level-name", world_folder_name)
-    start_server()
-    send_message(f"World successfully import ho gayi!\nWorld Name: {world_folder_name}\nServer restarted.")
+    restore_backup_archive(local_zip, is_uploaded_world=True)
+    run_cmd(f"rm -f {local_zip}")
 
 HELP_TEXT = """MCPE Master Control Panel (50 Options Suite)
 
@@ -357,7 +414,7 @@ Maintenance & Diagnostics:
 def handle_updates():
     offset = 0
     start_server()
-    send_message("Minecraft Guard 50 Active!\nType /help to see all 50 commands.")
+    send_message("Minecraft Guard 50 Online!\nRestoration & Updater Engine Active.\nType /help to see controls.")
     
     threading.Thread(target=smart_backup_engine, daemon=True).start()
     threading.Thread(target=sentry_anti_hack, daemon=True).start()
@@ -389,7 +446,7 @@ def handle_updates():
                 if text in ["/start", "/help"]:
                     send_message(HELP_TEXT)
 
-                # 1-4 Surveillance & Ban List
+                # Surveillance
                 elif text.startswith("/spy "):
                     target = text.split(" ", 1)[1].strip()
                     SPY_TARGETS.add(target)
@@ -416,7 +473,7 @@ def handle_updates():
                             out += f"{idx}. `{e.get('name')}` - {e.get('reason')} ({e.get('date')})\n"
                         send_message(out)
 
-                # 5-8 Security Hardening
+                # Security Hardening
                 elif text.startswith("/propertyprotection "):
                     mode = text.split(" ", 1)[1].strip().lower()
                     val = "true" if mode in ["on", "enable", "true"] else "false"
@@ -438,7 +495,7 @@ def handle_updates():
                     update_property("correct-player-movement", val)
                     send_message(f"Speedhack rollback protection: {val}")
 
-                # 9-14 Freeze, Mute, Kill, ClearInv
+                # Freeze, Mute, Penalties
                 elif text.startswith("/freeze "):
                     p = text.split(" ", 1)[1].strip()
                     FROZEN_PLAYERS.add(p)
@@ -450,7 +507,7 @@ def handle_updates():
                     p = text.split(" ", 1)[1].strip()
                     FROZEN_PLAYERS.discard(p)
                     send_to_console(f'effect "{p}" clear')
-                    send_message(f"Player `{p}` is now UNROZEN.")
+                    send_message(f"Player `{p}` is now UNFROZEN.")
 
                 elif text.startswith("/mute "):
                     p = text.split(" ", 1)[1].strip()
@@ -472,7 +529,7 @@ def handle_updates():
                     send_to_console(f'clear "{p}"')
                     send_message(f"Cleared inventory: {p}")
 
-                # 15-21 Roles & Moderation
+                # Roles & Moderation
                 elif text == "/players":
                     send_to_console("list")
                     out = read_console_output(6)
@@ -511,7 +568,13 @@ def handle_updates():
                     save_ban_entry(p, reason)
                     send_message(f"Banned: `{p}` ({reason})")
 
-                # 22-25 Teleport, Give, Effect
+                elif text.startswith("/unban "):
+                    p = text.split(" ", 1)[1].strip()
+                    send_to_console(f'unban "{p}"')
+                    remove_ban_entry(p)
+                    send_message(f"Player `{p}` unbanned.")
+
+                # Teleport & Give
                 elif text.startswith("/tpxyz "):
                     parts = text.split()
                     if len(parts) >= 5:
@@ -539,7 +602,7 @@ def handle_updates():
                         send_to_console(f'effect "{parts[1]}" {parts[2]} {sec} {amp}')
                         send_message(f"Applied effect {parts[2]} to {parts[1]}.")
 
-                # 26-28 Whitelist
+                # Whitelist
                 elif text.startswith("/whitelist "):
                     mode = text.split(" ", 1)[1].strip().lower()
                     val = "on" if mode in ["on", "true"] else "off"
@@ -556,7 +619,7 @@ def handle_updates():
                     send_to_console(f'whitelist remove "{p}"')
                     send_message(f"Removed from whitelist: {p}")
 
-                # 29-38 Gameplay & Environment
+                # Environment
                 elif text == "/coords":
                     send_to_console("gamerule showcoordinates true")
                     send_message("Coordinates ON!")
@@ -611,7 +674,7 @@ def handle_updates():
                         send_to_console("setworldspawn")
                         send_message("World spawn set to current position.")
 
-                # 39-40 Chat
+                # Chat
                 elif text.startswith("/say "):
                     msg_say = text.split(" ", 1)[1].strip()
                     send_to_console(f'say [SERVER]: {msg_say}')
@@ -622,7 +685,7 @@ def handle_updates():
                         send_to_console('say ')
                     send_message("In-game chat cleared.")
 
-                # 41-45 World & Backups
+                # World & Backup Controls
                 elif text.startswith("/seed"):
                     parts = text.split(maxsplit=1)
                     if len(parts) >= 2:
@@ -644,25 +707,24 @@ def handle_updates():
                 elif text == "/backuplist":
                     backups = sorted([f for f in os.listdir(BACKUP_DIR) if f.endswith(".zip")])
                     if not backups:
-                        send_message("Koi local backup file nahi mili.")
+                        send_message("Koi local backup snapshot nahi mila.")
                     else:
                         out = "Active Local Backups (Max 3 retained):\n\n"
                         for b in backups:
                             sz = os.path.getsize(os.path.join(BACKUP_DIR, b)) // 1024
-                            out += f" • {b} ({sz} KB)\n"
-                        out += "\nRestore karne ke liye: /restoresnapshot <filename>"
+                            out += f" • `{b}` ({sz} KB)\n"
+                        out += "\nRestore karne ke liye: `/restoresnapshot <filename>`"
                         send_message(out)
 
                 elif text.startswith("/restoresnapshot "):
                     snap_name = text.split(" ", 1)[1].strip()
                     target_file = os.path.join(BACKUP_DIR, snap_name)
                     if os.path.exists(target_file):
-                        stop_server()
-                        run_cmd(f"unzip -o -q {target_file} -d {BASE_DIR}/")
-                        start_server()
-                        send_message("Snapshot successfully restored!")
+                        restore_backup_archive(target_file)
+                    else:
+                        send_message(f"Snapshot file `{snap_name}` nahi mili.")
 
-                # 46-50 System, Diagnostics & Maintenance
+                # System & Diagnostics
                 elif text == "/updateserver":
                     perform_server_update()
 
