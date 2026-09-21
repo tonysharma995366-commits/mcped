@@ -93,7 +93,6 @@ def update_property(key, value):
     with open(PROPERTIES_FILE, "w") as f:
         f.writelines(new_lines)
 
-# Ban list handler
 def load_ban_list():
     if not os.path.exists(BAN_LIST_FILE):
         return []
@@ -123,7 +122,7 @@ def remove_ban_entry(player):
     with open(BAN_LIST_FILE, "w") as f:
         json.dump(updated, f, indent=4)
 
-# 15-Min Backup & 12 PM Telegram Engine
+# 15-Min Rotating Backup & 12 PM Dispatch
 def smart_backup_engine():
     daily_sent_date = ""
     while True:
@@ -131,10 +130,9 @@ def smart_backup_engine():
             now = datetime.now()
             current_date_str = now.strftime("%Y-%m-%d")
             
-            # Daily 12:00 PM Dispatch
             if now.hour == 12 and now.minute == 0 and daily_sent_date != current_date_str:
                 daily_sent_date = current_date_str
-                send_message("Daily 12:00 PM Automated Backup generate ho raha hai...")
+                send_message("Daily 12:00 PM Cloud Backup generate ho raha hai...")
                 timestamp = now.strftime("%Y%m%d_120000")
                 daily_zip = os.path.join(BACKUP_DIR, f"daily_backup_{timestamp}.zip")
                 
@@ -145,11 +143,10 @@ def smart_backup_engine():
                         f_path = os.path.join(BACKUP_DIR, f)
                         if os.path.isfile(f_path):
                             os.remove(f_path)
-                    send_message("Daily backup delivered! Local backup folder wiped.")
+                    send_message("Daily backup delivered! Local backup storage wiped.")
                 time.sleep(60)
                 continue
 
-            # Standard 15-Minute Local Snapshot with Max 3 Retention
             timestamp = now.strftime("%Y%m%d_%H%M%S")
             backup_file = os.path.join(BACKUP_DIR, f"backup_{timestamp}.zip")
             run_cmd(f"cd {BASE_DIR} && zip -rq {backup_file} worlds/ server.properties blacklist.json")
@@ -169,7 +166,7 @@ def smart_backup_engine():
             
         time.sleep(900)
 
-# Real-Time Sentry & Hack Detect
+# Sentry Engine
 def sentry_anti_hack():
     last_processed_line = ""
     HACK_PATTERNS = [
@@ -223,9 +220,7 @@ def sentry_anti_hack():
         except Exception:
             pass
 
-# ------------------------------------------------------------------
-# MANUAL + AUTO UPDATE ENGINE (Supports custom version)
-# ------------------------------------------------------------------
+# Mojang updater
 def perform_server_update(custom_version=None):
     if custom_version:
         version_str = custom_version.strip()
@@ -236,10 +231,8 @@ def perform_server_update(custom_version=None):
         cmd = 'curl -s -A "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36" https://www.minecraft.net/en-us/download/server/bedrock | grep -o "https://[^\"]*bedrock-server-[^\"]*\\.zip" | head -n 1'
         res = run_cmd(cmd)
         latest_url = res.stdout.strip()
-        
         if not latest_url or "bedrock-server-" not in latest_url:
             latest_url = "https://www.minecraft.net/bedrockdedicatedserver/bin-linux/bedrock-server-1.26.51.1.zip"
-            
         version_str = latest_url.split("bedrock-server-")[-1].replace(".zip", "")
         send_message(f"Targeting Latest Detected Version: `{version_str}`\nBinary downloading & upgrading...")
     
@@ -249,7 +242,7 @@ def perform_server_update(custom_version=None):
     
     dl_res = run_cmd(f'wget --user-agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64)" -O {update_zip} "{latest_url}"')
     if dl_res.returncode != 0 or not os.path.exists(update_zip) or os.path.getsize(update_zip) < 1000000:
-        send_message(f"❌ Version `{version_str}` download fail ho gaya! Kripya version number check karein (URL galat ho sakti hai). Server restarting...")
+        send_message(f"❌ Version `{version_str}` download fail ho gaya! Server restarting...")
         start_server()
         return
 
@@ -257,10 +250,8 @@ def perform_server_update(custom_version=None):
     run_cmd(f"rm -rf {extract_dir} && mkdir -p {extract_dir}")
     run_cmd(f"unzip -o -q {update_zip} -d {extract_dir}")
     
-    # Update bedrock_server without touching worlds/ or server.properties
     run_cmd(f"cp -f {extract_dir}/bedrock_server {BASE_DIR}/bedrock_server")
     run_cmd(f"chmod +x {BASE_DIR}/bedrock_server")
-    
     for item in ["libcrypto.so.1.1", "libssl.so.1.1", "definitions", "behavior_packs", "resource_packs"]:
         src_item = os.path.join(extract_dir, item)
         if os.path.exists(src_item):
@@ -270,11 +261,9 @@ def perform_server_update(custom_version=None):
     start_server()
     send_message(f"✅ Server successfully updated to version: `{version_str}`!\nServer online hai, game se connect karein.")
 
-# ------------------------------------------------------------------
-# ZIP / MCWORLD RESTORE ENGINE
-# ------------------------------------------------------------------
-def restore_backup_archive(archive_path, is_uploaded_world=False):
-    send_message("Restoring world archive. Verifying integrity...")
+# World Restorer (Auto selects real world by db size)
+def restore_backup_archive(archive_path):
+    send_message("Restoring world archive. Analyzing all world builds & player inventory...")
     stop_server()
     
     temp_unzip = os.path.join(BASE_DIR, "temp_restore")
@@ -283,33 +272,49 @@ def restore_backup_archive(archive_path, is_uploaded_world=False):
     with zipfile.ZipFile(archive_path, 'r') as zip_ref:
         zip_ref.extractall(temp_unzip)
         
-    if os.path.exists(os.path.join(temp_unzip, "server.properties")) and os.path.exists(os.path.join(temp_unzip, "worlds")):
-        run_cmd(f"cp -rf {temp_unzip}/worlds/* {WORLDS_DIR}/")
-        run_cmd(f"cp -f {temp_unzip}/server.properties {PROPERTIES_FILE}")
+    extracted_worlds_dir = os.path.join(temp_unzip, "worlds")
+    active_world_folder = None
+
+    if os.path.exists(extracted_worlds_dir):
+        run_cmd(f"cp -rf {extracted_worlds_dir}/* {WORLDS_DIR}/")
+        if os.path.exists(os.path.join(temp_unzip, "server.properties")):
+            run_cmd(f"cp -f {temp_unzip}/server.properties {PROPERTIES_FILE}")
         if os.path.exists(os.path.join(temp_unzip, "blacklist.json")):
             run_cmd(f"cp -f {temp_unzip}/blacklist.json {BAN_LIST_FILE}")
-        send_message("Full server snapshot restored successfully.")
+
+        # Choose the world that actually contains data/builds
+        max_db_size = -1
+        for w in os.listdir(WORLDS_DIR):
+            w_path = os.path.join(WORLDS_DIR, w)
+            db_path = os.path.join(w_path, "db")
+            if os.path.isdir(db_path):
+                total_size = sum(os.path.getsize(os.path.join(db_path, f)) for f in os.listdir(db_path) if os.path.isfile(os.path.join(db_path, f)))
+                if total_size > max_db_size:
+                    max_db_size = total_size
+                    active_world_folder = w
     else:
         level_dat_dir = None
         for root, dirs, files in os.walk(temp_unzip):
             if "level.dat" in files:
                 level_dat_dir = root
                 break
-                
-        world_folder_name = f"imported_world_{int(time.time())}"
-        target_dir = os.path.join(WORLDS_DIR, world_folder_name)
         
+        target_name = f"world_{int(time.time())}"
+        target_path = os.path.join(WORLDS_DIR, target_name)
         if level_dat_dir:
-            shutil.copytree(level_dat_dir, target_dir, dirs_exist_ok=True)
+            shutil.copytree(level_dat_dir, target_path, dirs_exist_ok=True)
         else:
-            shutil.copytree(temp_unzip, target_dir, dirs_exist_ok=True)
-            
-        update_property("level-name", world_folder_name)
-        send_message(f"Custom world map restored!\nActive World Name: `{world_folder_name}`")
+            shutil.copytree(temp_unzip, target_path, dirs_exist_ok=True)
+        active_world_folder = target_name
+
+    if active_world_folder:
+        update_property("level-name", active_world_folder)
+        run_cmd(f"chmod -R 777 {WORLDS_DIR}")
+        send_message(f"✅ World Active: `{active_world_folder}`\nBuilds, Farms & Player Inventories successfully restored!")
 
     run_cmd(f"rm -rf {temp_unzip}")
     start_server()
-    send_message("✅ World restoration complete. Bedrock Server online!")
+    send_message("Server online hai! Game join karein.")
 
 def handle_document(doc):
     file_name = doc.get("file_name", "world.zip")
@@ -329,86 +334,92 @@ def handle_document(doc):
         for chunk in r.iter_content(chunk_size=8192):
             f.write(chunk)
             
-    restore_backup_archive(local_zip, is_uploaded_world=True)
+    restore_backup_archive(local_zip)
     run_cmd(f"rm -f {local_zip}")
 
-HELP_TEXT = """MCPE Master Control Panel (50 Options Suite)
+HELP_TEXT = """MCPE Master Control Panel (Farm Chunk & Core Suite)
+
+Farm Chunk Loader (Radius Based):
+1. /loadchunk <X> <Z> <radius> [name] - Center point + radius se charo taraf chunks load karein
+2. /chunklist - Active loaded chunk areas check karein
+3. /removechunk <name> - Specific loaded chunk area delete karein
+4. /removeallchunks - Saare loaded chunk areas clear karein
 
 Surveillance & Auto-Ban:
-1. /spy <player> - Lock target for high-rate scan & auto-ban
-2. /unspy <player> - Remove from surveillance
-3. /spylist - Active surveillance list
-4. /banlist - View banned players & reasons
+5. /spy <player> - Lock target for high-rate scan & auto-ban
+6. /unspy <player> - Remove from surveillance
+7. /spylist - Active surveillance list
+8. /banlist - View banned players & reasons
 
 Security Hardening:
-5. /propertyprotection <on|off> - Block break/place lock
-6. /chestlock <on|off> - Container theft lock
-7. /antixray <on|off> - Block custom X-Ray texture packs
-8. /speedhackprotection <on|off> - Movement rewinds & rollback
+9. /propertyprotection <on|off> - Block break/place lock
+10. /chestlock <on|off> - Container theft lock
+11. /antixray <on|off> - Block custom X-Ray texture packs
+12. /speedhackprotection <on|off> - Movement rewinds & rollback
 
 Player Punishment & Freeze:
-9. /freeze <player> - Lock player in place permanently
-10. /unfreeze <player> - Remove movement lock
-11. /mute <player> - Block player from chat
-12. /unmute <player> - Allow chat
-13. /kill <player> - Kill player
-14. /clearinv <player> - Wipe player inventory
+13. /freeze <player> - Lock player in place permanently
+14. /unfreeze <player> - Remove movement lock
+15. /mute <player> - Block player from chat
+16. /unmute <player> - Allow chat
+17. /kill <player> - Kill player
+18. /clearinv <player> - Wipe player inventory
 
 Player Roles & Permissions:
-15. /players - List online players
-16. /visitor <player> - Restrict to Visitor
-17. /member <player> - Set to Member
-18. /op <player> - Grant OP
-19. /deop <player> - Revoke OP
-20. /kick <player> - Kick player
-21. /ban <player> [reason] - Manual Ban & Blacklist
+19. /players - List online players
+20. /visitor <player> - Restrict to Visitor
+21. /member <player> - Set to Member
+22. /op <player> - Grant OP
+23. /deop <player> - Revoke OP
+24. /kick <player> - Kick player
+25. /ban <player> [reason] - Manual Ban & Blacklist
 
 Teleport & Inventory:
-22. /tp <p1> <p2> - Teleport player1 to player2
-23. /tpxyz <p> <x> <y> <z> - Teleport to coordinates
-24. /give <p> <item> [count] - Give item
-25. /effect <p> <effect> [sec] [amp] - Apply potion effect
+26. /tp <p1> <p2> - Teleport player1 to player2
+27. /tpxyz <p> <x> <y> <z> - Teleport to coordinates
+28. /give <p> <item> [count] - Give item
+29. /effect <p> <effect> [sec] [amp] - Apply potion effect
 
 Whitelist:
-26. /whitelist <on|off> - Whitelist toggle
-27. /whitelistadd <player> - Add to whitelist
-28. /whitelistremove <player> - Remove from whitelist
+30. /whitelist <on|off> - Whitelist toggle
+31. /whitelistadd <player> - Add to whitelist
+32. /whitelistremove <player> - Remove from whitelist
 
 Gameplay & Environment:
-29. /coords - Toggle coordinates
-30. /keepinventory - Toggle KeepInventory
-31. /pvp <on|off> - Toggle PVP
-32. /difficulty <peaceful|easy|normal|hard>
-33. /gamemode <survival|creative|adventure>
-34. /time <day|night|noon|midnight>
-35. /weather <clear|rain|thunder>
-36. /mobspawning <true|false>
-37. /killmobs - Clear hostile mobs
-38. /setworldspawn [x y z] - Set world spawn point
+33. /coords - Toggle coordinates
+34. /keepinventory - Toggle KeepInventory
+35. /pvp <on|off> - Toggle PVP
+36. /difficulty <peaceful|easy|normal|hard>
+37. /gamemode <survival|creative|adventure>
+38. /time <day|night|noon|midnight>
+39. /weather <clear|rain|thunder>
+40. /mobspawning <true|false>
+41. /killmobs - Clear hostile mobs
+42. /setworldspawn [x y z] - Set world spawn point
 
 Chat & Broadcast:
-39. /say <message> - Server broadcast
-40. /clearchat - Clear in-game chat screen
+43. /say <message> - Server broadcast
+44. /clearchat - Clear in-game chat screen
 
 World & Backups:
-41. /seed <number> - Generate world with seed
-42. [Send .zip / .mcworld] - Restore world map
-43. /backup - Download full backup zip
-44. /backuplist - View local snapshots (Max 3)
-45. /restoresnapshot <file> - Restore local backup
+45. /seed <number> - Generate world with seed
+46. [Send .zip / .mcworld] - Restore world map (Builds & inventory safe)
+47. /backup - Download full backup zip
+48. /backuplist - View local snapshots (Max 3)
+49. /restoresnapshot <file> - Restore local backup
 
 Maintenance & Diagnostics:
-46. /updateserver [version] - Update server (e.g. /updateserver 1.26.51.1)
-47. /status - Server & tunnel status
-48. /serverstats - System CPU, RAM & Disk stats
-49. /logs - Live console logs
-50. /restart - Safe restart Bedrock server
+50. /updateserver [version] - Update server (e.g. /updateserver 1.26.51.1)
+51. /status - Server & tunnel status
+52. /serverstats - System CPU, RAM & Disk stats
+53. /logs - Live console logs
+54. /restart - Safe restart Bedrock server
 """
 
 def handle_updates():
     offset = 0
     start_server()
-    send_message("Minecraft Guard Online!\nManual/Auto Updater Ready.\nType /help to view commands.")
+    send_message("Minecraft Guard Online!\nRadius Chunk Loader Active.\nType /help to view controls.")
     
     threading.Thread(target=smart_backup_engine, daemon=True).start()
     threading.Thread(target=sentry_anti_hack, daemon=True).start()
@@ -439,6 +450,71 @@ def handle_updates():
                 
                 if text in ["/start", "/help"]:
                     send_message(HELP_TEXT)
+
+                # -------------------------------------------------------------
+                # RADIUS BASED CHUNK LOADER
+                # -------------------------------------------------------------
+                elif text.startswith("/loadchunk"):
+                    # Usage: /loadchunk <X> <Z> <radius> [name]
+                    # Or with Y: /loadchunk <X> <Y> <Z> <radius> [name]
+                    parts = text.split()
+                    try:
+                        if len(parts) >= 4:
+                            if len(parts) == 4 or (len(parts) == 5 and not parts[4].lstrip('-').isdigit()):
+                                # 2D: X Z radius [name]
+                                cx = int(parts[1])
+                                cz = int(parts[2])
+                                rad = int(parts[3])
+                                area_name = parts[4] if len(parts) >= 5 else f"farm_{int(time.time())}"
+                                
+                                x1, x2 = cx - rad, cx + rad
+                                z1, z2 = cz - rad, cz + rad
+                                send_to_console(f"tickingarea add {x1} 0 {z1} {x2} 256 {z2} {area_name}")
+                                time.sleep(0.5)
+                                send_message(
+                                    f"🌾 **Farm Chunk Area Loaded!**\n"
+                                    f"Name: `{area_name}`\n"
+                                    f"Center: `({cx}, {cz})` | Radius: `{rad}` blocks\n"
+                                    f"Range Covered: `({x1}, {z1})` to `({x2}, {z2})`\n"
+                                    f"Yeh poora area 24/7 bina kisi player ke load rahega!"
+                                )
+                            elif len(parts) >= 5:
+                                # 3D: X Y Z radius [name]
+                                cx = int(parts[1])
+                                cy = int(parts[2])
+                                cz = int(parts[3])
+                                rad = int(parts[4])
+                                area_name = parts[5] if len(parts) >= 6 else f"farm_{int(time.time())}"
+                                
+                                x1, x2 = cx - rad, cx + rad
+                                z1, z2 = cz - rad, cz + rad
+                                send_to_console(f"tickingarea add {x1} 0 {z1} {x2} 256 {z2} {area_name}")
+                                time.sleep(0.5)
+                                send_message(
+                                    f"🌾 **Farm Chunk Area Loaded!**\n"
+                                    f"Name: `{area_name}`\n"
+                                    f"Center: `({cx}, {cy}, {cz})` | Radius: `{rad}` blocks\n"
+                                    f"Range Covered: `({x1}, {z1})` to `({x2}, {z2})`\n"
+                                    f"Farms 24/7 background me run honge."
+                                )
+                        else:
+                            send_message("Usage: `/loadchunk <X> <Z> <radius> [name]`\nExample: `/loadchunk 100 200 30 iron_farm`")
+                    except Exception as e:
+                        send_message(f"Input error! Kripya sahi numbers dalein. Details: {e}")
+
+                elif text == "/chunklist":
+                    send_to_console("tickingarea list all-dimensions")
+                    out = read_console_output(10)
+                    send_message(f"📌 Active Loaded Chunks (Ticking Areas):\n{out}")
+
+                elif text.startswith("/removechunk "):
+                    name = text.split(" ", 1)[1].strip()
+                    send_to_console(f"tickingarea remove {name}")
+                    send_message(f"Chunk area `{name}` removed.")
+
+                elif text == "/removeallchunks":
+                    send_to_console("tickingarea remove_all")
+                    send_message("Saare active loaded chunk areas delete kar diye gaye.")
 
                 # Surveillance
                 elif text.startswith("/spy "):
@@ -718,7 +794,6 @@ def handle_updates():
                     else:
                         send_message(f"Snapshot file `{snap_name}` nahi mili.")
 
-                # 46. UPDATESERVER (Supports custom version e.g. /updateserver 1.26.51.1)
                 elif text.startswith("/updateserver"):
                     parts = text.split()
                     custom_ver = parts[1].strip() if len(parts) > 1 else None
