@@ -16,9 +16,11 @@ send_tg() {
         -d "text=${text}" > /dev/null
 }
 
-(
-    # 2. Launch Playit to get Tunnel Info
+# Function to spawn Playit and generate clean claim URL
+generate_claim_url() {
+    pkill -9 playit-cli 2>/dev/null || true
     rm -f /tmp/playit_output.log
+    
     /usr/local/bin/playit-cli > /tmp/playit_output.log 2>&1 &
     PLAYIT_PID=$!
 
@@ -39,12 +41,18 @@ $CLAIM_URL
 Protocol: Minecraft Bedrock (UDP)
 Port: 19132
 
-Claim karne ke baad bot ko 'done' likhkar bhejein."
+Claim karne ke baad bot ko 'done' likhkar bhejein.
+Agar link expire ho jaye ya reload ho jaye toh 'relink' bhejein."
     else
-        send_tg "Playit tunnel active. Verifying server files..."
+        send_tg "Playit tunnel active. Claim link nahi mila ya pehle se claimed hai."
     fi
+}
 
-    # 3. Wait for Telegram Confirmation ('done' or 'ready')
+(
+    # 2. Launch initial Playit Claim URL
+    generate_claim_url
+
+    # 3. Wait for User Telegram Response ('done' ya 'relink')
     LAST_UPDATE_ID=$(curl -s "https://api.telegram.org/bot${BOT_TOKEN}/getUpdates" | grep -o '"update_id":[0-9]*' | tail -n 1 | cut -d: -f2)
     [ -z "$LAST_UPDATE_ID" ] && LAST_UPDATE_ID=0
 
@@ -56,16 +64,24 @@ Claim karne ke baad bot ko 'done' likhkar bhejein."
             NEW_ID=$(echo "$UPDATES" | grep -o '"update_id":[0-9]*' | tail -n 1 | cut -d: -f2)
             LAST_UPDATE_ID=$NEW_ID
             
+            # Agar user ne 'relink' / 'resend' / 'new' bheja toh naya URL generate karega
+            if [[ "$MSG" =~ ^(relink|resend|new|regenerate|link)$ ]]; then
+                send_tg "Naya Playit Claim Link generate ho raha hai, kripya wait karein..."
+                generate_claim_url
+                continue
+            fi
+
+            # Claim hone ke baad 'done' aate hi server install & boot hoga
             if [[ "$MSG" =~ ^(done|ok|yes|ready|ho gaya|ban gaya)$ ]]; then
                 CONFIRMED=true
-                send_tg "Confirmation received! Downloading latest secure Mojang binary..."
+                send_tg "Tunnel confirmed! Downloading latest secure Mojang binary..."
                 break
             fi
         fi
         sleep 3
     done
 
-    # 4. Stop initial Playit check to launch properly in screen later
+    # 4. Stop initial Playit check to launch properly in screen session later
     kill $PLAYIT_PID 2>/dev/null || true
     sleep 2
 
@@ -76,11 +92,7 @@ Claim karne ke baad bot ko 'done' likhkar bhejein."
 
     # Fetch latest official server binary on first boot
     if [ ! -f "bedrock_server" ]; then
-        LATEST_ZIP_URL=$(curl -s -H "User-Agent: Mozilla/5.0 (X11; Linux x86_64)" https://www.minecraft.net/en-us/download/server/bedrock | grep -o 'https://www.minecraft.net/bedrockdedicatedserver/bin-linux/bedrock-server-[^"]*\.zip' | head -n 1)
-        if [ -z "$LATEST_ZIP_URL" ]; then
-            # Fail-safe URL
-            LATEST_ZIP_URL="https://www.minecraft.net/bedrockdedicatedserver/bin-linux/bedrock-server-1.21.0.03.zip"
-        fi
+        LATEST_ZIP_URL="https://www.minecraft.net/bedrockdedicatedserver/bin-linux/bedrock-server-1.26.51.1.zip"
         wget --user-agent="Mozilla/5.0" -O bedrock-server-latest.zip "$LATEST_ZIP_URL"
         unzip -o -q bedrock-server-latest.zip
         chmod +x bedrock_server
@@ -91,7 +103,7 @@ Claim karne ke baad bot ko 'done' likhkar bhejein."
         echo "[]" > blacklist.json
     fi
 
-    # 6. Apply Default Ironclad Security Properties
+    # 6. Apply Default Security Properties
     sed -i 's/texturepack-required=.*/texturepack-required=true/g' server.properties 2>/dev/null || echo "texturepack-required=true" >> server.properties
     sed -i 's/correct-player-movement=.*/correct-player-movement=true/g' server.properties 2>/dev/null || echo "correct-player-movement=true" >> server.properties
     sed -i 's/server-authoritative-movement=.*/server-authoritative-movement=server-auth-with-rewind/g' server.properties 2>/dev/null || echo "server-authoritative-movement=server-auth-with-rewind" >> server.properties
@@ -104,7 +116,7 @@ Claim karne ke baad bot ko 'done' likhkar bhejein."
     screen -dmS playit-tunnel /usr/local/bin/playit-cli
     screen -dmS tg-bot python3 /root/tg_manager.py
 
-    send_tg "Setup Complete! 50-Options Control Panel is Online. Type /help in bot to begin."
+    send_tg "Setup Complete! Bedrock Server & Control Panel Online. Type /help in bot to begin."
 ) &
 
 # Keep container alive
