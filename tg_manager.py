@@ -138,11 +138,9 @@ def smart_backup_engine():
                 timestamp = now.strftime("%Y%m%d_120000")
                 daily_zip = os.path.join(BACKUP_DIR, f"daily_backup_{timestamp}.zip")
                 
-                # Safe backup creation
                 run_cmd(f"cd {BASE_DIR} && zip -rq {daily_zip} worlds/ server.properties blacklist.json")
                 
                 if send_document(daily_zip, f"Daily 12:00 PM Cloud Backup ({current_date_str})"):
-                    # Wipe local temporary backups
                     for f in os.listdir(BACKUP_DIR):
                         f_path = os.path.join(BACKUP_DIR, f)
                         if os.path.isfile(f_path):
@@ -226,30 +224,32 @@ def sentry_anti_hack():
             pass
 
 # ------------------------------------------------------------------
-# ROBUST AUTO-UPDATER (Fixed Mojang Scraping & Binary Swap)
+# MANUAL + AUTO UPDATE ENGINE (Supports custom version)
 # ------------------------------------------------------------------
-def perform_server_update():
-    send_message("Minecraft official server updates verify ho rahe hain...")
-    
-    # Try fetching with multi-browser headers
-    cmd = 'curl -s -A "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" https://www.minecraft.net/en-us/download/server/bedrock | grep -o "https://[^\"]*bedrock-server-[^\"]*\\.zip" | head -n 1'
-    res = run_cmd(cmd)
-    latest_url = res.stdout.strip()
-    
-    # Fallback to direct client binary release endpoint if site scraper is blocked
-    if not latest_url or "bedrock-server-" not in latest_url:
-        latest_url = "https://www.minecraft.net/bedrockdedicatedserver/bin-linux/bedrock-server-1.26.45.1.zip"
+def perform_server_update(custom_version=None):
+    if custom_version:
+        version_str = custom_version.strip()
+        latest_url = f"https://www.minecraft.net/bedrockdedicatedserver/bin-linux/bedrock-server-{version_str}.zip"
+        send_message(f"Targeting Manual Version: `{version_str}`\nDownloading binary from Mojang...")
+    else:
+        send_message("Minecraft official server updates verify ho rahe hain...")
+        cmd = 'curl -s -A "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36" https://www.minecraft.net/en-us/download/server/bedrock | grep -o "https://[^\"]*bedrock-server-[^\"]*\\.zip" | head -n 1'
+        res = run_cmd(cmd)
+        latest_url = res.stdout.strip()
         
-    version_str = latest_url.split("bedrock-server-")[-1].replace(".zip", "")
-    send_message(f"Targeting Version: {version_str}\nBinary downloading & upgrading...")
+        if not latest_url or "bedrock-server-" not in latest_url:
+            latest_url = "https://www.minecraft.net/bedrockdedicatedserver/bin-linux/bedrock-server-1.26.51.1.zip"
+            
+        version_str = latest_url.split("bedrock-server-")[-1].replace(".zip", "")
+        send_message(f"Targeting Latest Detected Version: `{version_str}`\nBinary downloading & upgrading...")
     
     stop_server()
     update_zip = os.path.join(BASE_DIR, "server_update_temp.zip")
     run_cmd(f'rm -f {update_zip}')
     
     dl_res = run_cmd(f'wget --user-agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64)" -O {update_zip} "{latest_url}"')
-    if dl_res.returncode != 0 or not os.path.exists(update_zip):
-        send_message("Binary package download fail ho gaya. Server restarting...")
+    if dl_res.returncode != 0 or not os.path.exists(update_zip) or os.path.getsize(update_zip) < 1000000:
+        send_message(f"❌ Version `{version_str}` download fail ho gaya! Kripya version number check karein (URL galat ho sakti hai). Server restarting...")
         start_server()
         return
 
@@ -257,11 +257,10 @@ def perform_server_update():
     run_cmd(f"rm -rf {extract_dir} && mkdir -p {extract_dir}")
     run_cmd(f"unzip -o -q {update_zip} -d {extract_dir}")
     
-    # Safely swap executable and dependencies WITHOUT overwriting worlds or configs
+    # Update bedrock_server without touching worlds/ or server.properties
     run_cmd(f"cp -f {extract_dir}/bedrock_server {BASE_DIR}/bedrock_server")
     run_cmd(f"chmod +x {BASE_DIR}/bedrock_server")
     
-    # Copy definitions, behavior packs and shared libraries safely
     for item in ["libcrypto.so.1.1", "libssl.so.1.1", "definitions", "behavior_packs", "resource_packs"]:
         src_item = os.path.join(extract_dir, item)
         if os.path.exists(src_item):
@@ -269,10 +268,10 @@ def perform_server_update():
             
     run_cmd(f"rm -rf {extract_dir} {update_zip}")
     start_server()
-    send_message(f"✅ Server successfully updated to version: {version_str}!\nServer online hai, game se connect karein.")
+    send_message(f"✅ Server successfully updated to version: `{version_str}`!\nServer online hai, game se connect karein.")
 
 # ------------------------------------------------------------------
-# ROBUST ZIP / MCWORLD RESTORE ENGINE (Fixed Level-Name & Structure)
+# ZIP / MCWORLD RESTORE ENGINE
 # ------------------------------------------------------------------
 def restore_backup_archive(archive_path, is_uploaded_world=False):
     send_message("Restoring world archive. Verifying integrity...")
@@ -284,7 +283,6 @@ def restore_backup_archive(archive_path, is_uploaded_world=False):
     with zipfile.ZipFile(archive_path, 'r') as zip_ref:
         zip_ref.extractall(temp_unzip)
         
-    # Check if this is a Full Server Backup (contains server.properties & worlds/)
     if os.path.exists(os.path.join(temp_unzip, "server.properties")) and os.path.exists(os.path.join(temp_unzip, "worlds")):
         run_cmd(f"cp -rf {temp_unzip}/worlds/* {WORLDS_DIR}/")
         run_cmd(f"cp -f {temp_unzip}/server.properties {PROPERTIES_FILE}")
@@ -292,8 +290,6 @@ def restore_backup_archive(archive_path, is_uploaded_world=False):
             run_cmd(f"cp -f {temp_unzip}/blacklist.json {BAN_LIST_FILE}")
         send_message("Full server snapshot restored successfully.")
     else:
-        # It is a World Map (.mcworld or map zip)
-        # Locate directory containing level.dat
         level_dat_dir = None
         for root, dirs, files in os.walk(temp_unzip):
             if "level.dat" in files:
@@ -306,13 +302,11 @@ def restore_backup_archive(archive_path, is_uploaded_world=False):
         if level_dat_dir:
             shutil.copytree(level_dat_dir, target_dir, dirs_exist_ok=True)
         else:
-            # Fallback direct copy
             shutil.copytree(temp_unzip, target_dir, dirs_exist_ok=True)
             
         update_property("level-name", world_folder_name)
         send_message(f"Custom world map restored!\nActive World Name: `{world_folder_name}`")
 
-    # Cleanup temp
     run_cmd(f"rm -rf {temp_unzip}")
     start_server()
     send_message("✅ World restoration complete. Bedrock Server online!")
@@ -404,7 +398,7 @@ World & Backups:
 45. /restoresnapshot <file> - Restore local backup
 
 Maintenance & Diagnostics:
-46. /updateserver - Auto update Mojang binary
+46. /updateserver [version] - Update server (e.g. /updateserver 1.26.51.1)
 47. /status - Server & tunnel status
 48. /serverstats - System CPU, RAM & Disk stats
 49. /logs - Live console logs
@@ -414,7 +408,7 @@ Maintenance & Diagnostics:
 def handle_updates():
     offset = 0
     start_server()
-    send_message("Minecraft Guard 50 Online!\nRestoration & Updater Engine Active.\nType /help to see controls.")
+    send_message("Minecraft Guard Online!\nManual/Auto Updater Ready.\nType /help to view commands.")
     
     threading.Thread(target=smart_backup_engine, daemon=True).start()
     threading.Thread(target=sentry_anti_hack, daemon=True).start()
@@ -724,10 +718,13 @@ def handle_updates():
                     else:
                         send_message(f"Snapshot file `{snap_name}` nahi mili.")
 
-                # System & Diagnostics
-                elif text == "/updateserver":
-                    perform_server_update()
+                # 46. UPDATESERVER (Supports custom version e.g. /updateserver 1.26.51.1)
+                elif text.startswith("/updateserver"):
+                    parts = text.split()
+                    custom_ver = parts[1].strip() if len(parts) > 1 else None
+                    perform_server_update(custom_ver)
 
+                # Diagnostics & Control
                 elif text == "/status":
                     out = run_cmd("screen -ls").stdout
                     status = "ONLINE" if "mcpe" in out else "OFFLINE"
