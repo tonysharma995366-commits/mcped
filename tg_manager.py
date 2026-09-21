@@ -39,7 +39,7 @@ def send_document(file_path, caption=""):
             requests.post(url, data={"chat_id": CHAT_ID, "caption": caption}, files={"document": doc}, timeout=180)
         return True
     except Exception as e:
-        send_message(f"File sending error: {e}")
+        send_message(f"❌ File upload error: {e}")
         return False
 
 def run_cmd(cmd):
@@ -64,7 +64,7 @@ def read_console_output(lines_count=15):
 
 def stop_server():
     send_to_console("stop")
-    time.sleep(2)
+    time.sleep(1.5)
     run_cmd("screen -S mcpe -X quit")
     run_cmd("pkill -9 bedrock_server")
     time.sleep(1)
@@ -122,7 +122,199 @@ def remove_ban_entry(player):
     with open(BAN_LIST_FILE, "w") as f:
         json.dump(updated, f, indent=4)
 
-# 15-Min Rotating Backup & 12 PM Dispatch
+# -------------------------------------------------------------
+# FACTORY RESET & FRESH SETUP ENGINE
+# -------------------------------------------------------------
+def trigger_factory_reset():
+    send_message(
+        "🧨 **FACTORY RESET INITIATED!**\n\n"
+        "• Bedrock server stop kiya ja raha hai...\n"
+        "• Saari world files, configs aur corrupt settings delete ho rahi hain...\n"
+        "• Purana Playit tunnel aur tokens wipe ho rahe hain...\n"
+        "• Fresh Playit tunnel generate kiya ja raha hai..."
+    )
+    
+    reset_script = """#!/bin/bash
+pkill -9 bedrock_server
+pkill -9 playit-cli
+screen -S mcpe -X quit 2>/dev/null || true
+screen -S playit-tunnel -X quit 2>/dev/null || true
+
+# Wipe all server data and playit tokens
+rm -rf /root/mcpe-server
+rm -rf /root/.config/playit /root/.playit /etc/playit*
+rm -f /tmp/playit* /tmp/mc_*
+
+# Re-run entrypoint in background
+if [ -f "/root/entrypoint.sh" ]; then
+    bash /root/entrypoint.sh &
+elif [ -f "/entrypoint.sh" ]; then
+    bash /entrypoint.sh &
+fi
+"""
+    with open("/tmp/do_reset.sh", "w") as f:
+        f.write(reset_script)
+    run_cmd("chmod +x /tmp/do_reset.sh")
+    
+    # Detach and run
+    subprocess.Popen(["bash", "/tmp/do_reset.sh"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    sys.exit(0)
+
+# -------------------------------------------------------------
+# WORLD RESTORATION & MANAGEMENT
+# -------------------------------------------------------------
+def restore_backup_archive(archive_path, file_name):
+    send_message(f"⚙️ [Step 2/5] Initializing restore for `{file_name}`...\n• Stopping Bedrock server safely to prevent chunk corruption...")
+    stop_server()
+    
+    send_message("📦 [Step 3/5] Extracting archive files to temporary buffer...")
+    temp_unzip = os.path.join(BASE_DIR, "temp_restore")
+    run_cmd(f"rm -rf {temp_unzip} && mkdir -p {temp_unzip}")
+    
+    try:
+        with zipfile.ZipFile(archive_path, 'r') as zip_ref:
+            zip_ref.extractall(temp_unzip)
+    except Exception as e:
+        send_message(f"❌ Zip extraction failed: {e}\nRestarting existing server...")
+        start_server()
+        return
+
+    send_message("🔍 [Step 4/5] Analyzing world folders, builds & level database...")
+    extracted_worlds_dir = os.path.join(temp_unzip, "worlds")
+    active_world_folder = None
+
+    if os.path.exists(extracted_worlds_dir):
+        run_cmd(f"cp -rf {extracted_worlds_dir}/* {WORLDS_DIR}/")
+        if os.path.exists(os.path.join(temp_unzip, "server.properties")):
+            run_cmd(f"cp -f {temp_unzip}/server.properties {PROPERTIES_FILE}")
+        if os.path.exists(os.path.join(temp_unzip, "blacklist.json")):
+            run_cmd(f"cp -f {temp_unzip}/blacklist.json {BAN_LIST_FILE}")
+
+        max_db_size = -1
+        detected_worlds = []
+        for w in os.listdir(WORLDS_DIR):
+            w_path = os.path.join(WORLDS_DIR, w)
+            db_path = os.path.join(w_path, "db")
+            if os.path.isdir(db_path):
+                total_size = sum(os.path.getsize(os.path.join(db_path, f)) for f in os.listdir(db_path) if os.path.isfile(os.path.join(db_path, f)))
+                total_mb = round(total_size / (1024 * 1024), 2)
+                detected_worlds.append(f"• `{w}` (Data: {total_mb} MB)")
+                if total_size > max_db_size:
+                    max_db_size = total_size
+                    active_world_folder = w
+        
+        send_message("📁 Found World Containers:\n" + "\n".join(detected_worlds))
+    else:
+        level_dat_dir = None
+        for root, dirs, files in os.walk(temp_unzip):
+            if "level.dat" in files:
+                level_dat_dir = root
+                break
+        
+        target_name = f"world_{int(time.time())}"
+        target_path = os.path.join(WORLDS_DIR, target_name)
+        if level_dat_dir:
+            shutil.copytree(level_dat_dir, target_path, dirs_exist_ok=True)
+        else:
+            shutil.copytree(temp_unzip, target_path, dirs_exist_ok=True)
+        active_world_folder = target_name
+
+    if active_world_folder:
+        send_message(f"🎯 Setting active world: `{active_world_folder}`\n• Fixing write permissions (chmod 777)...")
+        update_property("level-name", active_world_folder)
+        run_cmd(f"chmod -R 777 {WORLDS_DIR}")
+        send_message("🚀 [Step 5/5] Launching Bedrock server with restored builds & inventory...")
+        start_server()
+        time.sleep(2)
+        send_message(f"✅ **WORLD RESTORATION COMPLETE!**\n• Active World: `{active_world_folder}`\n• Server Status: ONLINE\nPhone se connect karein, sabhi builds aur inventory active hain!")
+    else:
+        send_message("⚠️ Active world directory detect nahi ho saki. Restarting server...")
+        start_server()
+
+    run_cmd(f"rm -rf {temp_unzip}")
+
+def handle_document(doc):
+    file_name = doc.get("file_name", "world.zip")
+    file_size = doc.get("file_size", 0)
+    total_size_mb = round(file_size / (1024 * 1024), 2)
+
+    if not file_name.endswith((".zip", ".mcworld")):
+        send_message("❌ Kripya sirf `.zip` ya `.mcworld` backup file bhejein!")
+        return
+
+    file_id = doc["file_id"]
+    send_message(f"📥 [Step 1/5] Backup file received!\n• Name: `{file_name}`\n• Size: `{total_size_mb} MB`\nDownloading from Telegram servers...")
+    
+    try:
+        res = requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={file_id}", timeout=20).json()
+        file_path = res["result"]["file_path"]
+        download_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
+        
+        local_zip = os.path.join(BASE_DIR, "uploaded_archive.zip")
+        r = requests.get(download_url, stream=True, timeout=120)
+        
+        downloaded = 0
+        last_reported_pct = -10
+        with open(local_zip, "wb") as f:
+            for chunk in r.iter_content(chunk_size=1024 * 512):
+                if chunk:
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    pct = int((downloaded / file_size) * 100) if file_size > 0 else 0
+                    if pct - last_reported_pct >= 25:
+                        last_reported_pct = pct
+                        dl_mb = round(downloaded / (1024 * 1024), 2)
+                        send_message(f"⏳ Download Progress: {pct}% ({dl_mb}/{total_size_mb} MB)")
+        
+        send_message(f"✅ Download finished! (100% - {total_size_mb} MB verified)")
+        restore_backup_archive(local_zip, file_name)
+        run_cmd(f"rm -f {local_zip}")
+    except Exception as e:
+        send_message(f"❌ File download me dikkat aayi: {e}")
+
+def perform_server_update(custom_version=None):
+    if custom_version:
+        version_str = custom_version.strip()
+        latest_url = f"https://www.minecraft.net/bedrockdedicatedserver/bin-linux/bedrock-server-{version_str}.zip"
+        send_message(f"🔄 [Step 1/4] Targeting version: `{version_str}`\nConnecting to official Mojang release...")
+    else:
+        send_message("🔄 [Step 1/4] Checking latest official Bedrock server release...")
+        cmd = 'curl -s -A "Mozilla/5.0" https://www.minecraft.net/en-us/download/server/bedrock | grep -o "https://[^\"]*bedrock-server-[^\"]*\\.zip" | head -n 1'
+        res = run_cmd(cmd)
+        latest_url = res.stdout.strip()
+        if not latest_url or "bedrock-server-" not in latest_url:
+            latest_url = "https://www.minecraft.net/bedrockdedicatedserver/bin-linux/bedrock-server-1.26.51.1.zip"
+        version_str = latest_url.split("bedrock-server-")[-1].replace(".zip", "")
+        send_message(f"Targeting version: `{version_str}`")
+
+    send_message(f"📥 [Step 2/4] Downloading Bedrock binary package for `{version_str}`...")
+    update_zip = os.path.join(BASE_DIR, "server_update_temp.zip")
+    run_cmd(f'rm -f {update_zip}')
+    
+    dl_res = run_cmd(f'wget --user-agent="Mozilla/5.0" -O {update_zip} "{latest_url}"')
+    if dl_res.returncode != 0 or not os.path.exists(update_zip) or os.path.getsize(update_zip) < 1000000:
+        send_message(f"❌ Version `{version_str}` download fail ho gaya! Server restarting...")
+        start_server()
+        return
+
+    send_message("⚙️ [Step 3/4] Swapping binaries... Worlds & configs safe.")
+    stop_server()
+    extract_dir = os.path.join(BASE_DIR, "temp_update")
+    run_cmd(f"rm -rf {extract_dir} && mkdir -p {extract_dir}")
+    run_cmd(f"unzip -o -q {update_zip} -d {extract_dir}")
+    
+    run_cmd(f"cp -f {extract_dir}/bedrock_server {BASE_DIR}/bedrock_server")
+    run_cmd(f"chmod +x {BASE_DIR}/bedrock_server")
+    for item in ["libcrypto.so.1.1", "libssl.so.1.1", "definitions", "behavior_packs", "resource_packs"]:
+        src_item = os.path.join(extract_dir, item)
+        if os.path.exists(src_item):
+            run_cmd(f"cp -rf {src_item} {BASE_DIR}/")
+            
+    run_cmd(f"rm -rf {extract_dir} {update_zip}")
+    send_message("🚀 [Step 4/4] Starting server with updated binaries...")
+    start_server()
+    send_message(f"✅ **UPDATE SUCCESSFUL!**\nServer version: `{version_str}`\nStatus: ONLINE.")
+
 def smart_backup_engine():
     daily_sent_date = ""
     while True:
@@ -161,21 +353,19 @@ def smart_backup_engine():
                         os.remove(old)
                     except Exception:
                         pass
-        except Exception as e:
-            print(f"Backup engine error: {e}")
-            
+        except Exception:
+            pass
         time.sleep(900)
 
-# Sentry Engine
 def sentry_anti_hack():
     last_processed_line = ""
     HACK_PATTERNS = [
-        ("moved wrongly", "Speedhack / Fly / Movement Exploit"),
+        ("moved wrongly", "Speedhack / Movement Exploit"),
         ("moved too quickly", "Speedhack / Teleport Glitch"),
         ("mismatch", "Position Desync / Phase Glitch"),
-        ("invalid packet", "Bad Packet / Crash Exploit Attempt"),
-        ("out of sync", "Tick Glitch / Dupe Attempt"),
-        ("illegal item", "Illegal Item Spawn / Duplication Attempt")
+        ("invalid packet", "Bad Packet / Exploit Attempt"),
+        ("out of sync", "Tick Desync / Dupe Attempt"),
+        ("illegal item", "Illegal Item Spawn Attempt")
     ]
     
     while True:
@@ -205,12 +395,7 @@ def sentry_anti_hack():
                                 send_to_console(f'kick "{target}" "Banned for {hack_name}"')
                                 save_ban_entry(target, f"{hack_name} (Auto-Ban Sentry)")
                                 SPY_TARGETS.discard(target)
-                                send_message(
-                                    f"🚨 **TARGET AUTO-BANNED!**\n"
-                                    f"Target: `{target}`\n"
-                                    f"Offense: `{hack_name}`\n"
-                                    f"Action: Auto-banned & added to /banlist."
-                                )
+                                send_message(f"🚨 **TARGET AUTO-BANNED!**\nTarget: `{target}`\nOffense: `{hack_name}`")
                                 break
                 
                 for pattern, hack_name in HACK_PATTERNS:
@@ -220,155 +405,41 @@ def sentry_anti_hack():
         except Exception:
             pass
 
-# Mojang updater
-def perform_server_update(custom_version=None):
-    if custom_version:
-        version_str = custom_version.strip()
-        latest_url = f"https://www.minecraft.net/bedrockdedicatedserver/bin-linux/bedrock-server-{version_str}.zip"
-        send_message(f"Targeting Manual Version: `{version_str}`\nDownloading binary from Mojang...")
-    else:
-        send_message("Minecraft official server updates verify ho rahe hain...")
-        cmd = 'curl -s -A "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36" https://www.minecraft.net/en-us/download/server/bedrock | grep -o "https://[^\"]*bedrock-server-[^\"]*\\.zip" | head -n 1'
-        res = run_cmd(cmd)
-        latest_url = res.stdout.strip()
-        if not latest_url or "bedrock-server-" not in latest_url:
-            latest_url = "https://www.minecraft.net/bedrockdedicatedserver/bin-linux/bedrock-server-1.26.51.1.zip"
-        version_str = latest_url.split("bedrock-server-")[-1].replace(".zip", "")
-        send_message(f"Targeting Latest Detected Version: `{version_str}`\nBinary downloading & upgrading...")
-    
-    stop_server()
-    update_zip = os.path.join(BASE_DIR, "server_update_temp.zip")
-    run_cmd(f'rm -f {update_zip}')
-    
-    dl_res = run_cmd(f'wget --user-agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64)" -O {update_zip} "{latest_url}"')
-    if dl_res.returncode != 0 or not os.path.exists(update_zip) or os.path.getsize(update_zip) < 1000000:
-        send_message(f"❌ Version `{version_str}` download fail ho gaya! Server restarting...")
-        start_server()
-        return
+HELP_TEXT = """MCPE Master Control Panel (55 Options Suite)
 
-    extract_dir = os.path.join(BASE_DIR, "temp_update")
-    run_cmd(f"rm -rf {extract_dir} && mkdir -p {extract_dir}")
-    run_cmd(f"unzip -o -q {update_zip} -d {extract_dir}")
-    
-    run_cmd(f"cp -f {extract_dir}/bedrock_server {BASE_DIR}/bedrock_server")
-    run_cmd(f"chmod +x {BASE_DIR}/bedrock_server")
-    for item in ["libcrypto.so.1.1", "libssl.so.1.1", "definitions", "behavior_packs", "resource_packs"]:
-        src_item = os.path.join(extract_dir, item)
-        if os.path.exists(src_item):
-            run_cmd(f"cp -rf {src_item} {BASE_DIR}/")
-            
-    run_cmd(f"rm -rf {extract_dir} {update_zip}")
-    start_server()
-    send_message(f"✅ Server successfully updated to version: `{version_str}`!\nServer online hai, game se connect karein.")
-
-# World Restorer (Auto selects real world by db size)
-def restore_backup_archive(archive_path):
-    send_message("Restoring world archive. Analyzing all world builds & player inventory...")
-    stop_server()
-    
-    temp_unzip = os.path.join(BASE_DIR, "temp_restore")
-    run_cmd(f"rm -rf {temp_unzip} && mkdir -p {temp_unzip}")
-    
-    with zipfile.ZipFile(archive_path, 'r') as zip_ref:
-        zip_ref.extractall(temp_unzip)
-        
-    extracted_worlds_dir = os.path.join(temp_unzip, "worlds")
-    active_world_folder = None
-
-    if os.path.exists(extracted_worlds_dir):
-        run_cmd(f"cp -rf {extracted_worlds_dir}/* {WORLDS_DIR}/")
-        if os.path.exists(os.path.join(temp_unzip, "server.properties")):
-            run_cmd(f"cp -f {temp_unzip}/server.properties {PROPERTIES_FILE}")
-        if os.path.exists(os.path.join(temp_unzip, "blacklist.json")):
-            run_cmd(f"cp -f {temp_unzip}/blacklist.json {BAN_LIST_FILE}")
-
-        # Choose the world that actually contains data/builds
-        max_db_size = -1
-        for w in os.listdir(WORLDS_DIR):
-            w_path = os.path.join(WORLDS_DIR, w)
-            db_path = os.path.join(w_path, "db")
-            if os.path.isdir(db_path):
-                total_size = sum(os.path.getsize(os.path.join(db_path, f)) for f in os.listdir(db_path) if os.path.isfile(os.path.join(db_path, f)))
-                if total_size > max_db_size:
-                    max_db_size = total_size
-                    active_world_folder = w
-    else:
-        level_dat_dir = None
-        for root, dirs, files in os.walk(temp_unzip):
-            if "level.dat" in files:
-                level_dat_dir = root
-                break
-        
-        target_name = f"world_{int(time.time())}"
-        target_path = os.path.join(WORLDS_DIR, target_name)
-        if level_dat_dir:
-            shutil.copytree(level_dat_dir, target_path, dirs_exist_ok=True)
-        else:
-            shutil.copytree(temp_unzip, target_path, dirs_exist_ok=True)
-        active_world_folder = target_name
-
-    if active_world_folder:
-        update_property("level-name", active_world_folder)
-        run_cmd(f"chmod -R 777 {WORLDS_DIR}")
-        send_message(f"✅ World Active: `{active_world_folder}`\nBuilds, Farms & Player Inventories successfully restored!")
-
-    run_cmd(f"rm -rf {temp_unzip}")
-    start_server()
-    send_message("Server online hai! Game join karein.")
-
-def handle_document(doc):
-    file_name = doc.get("file_name", "world.zip")
-    if not file_name.endswith((".zip", ".mcworld")):
-        send_message("Kripya sirf .zip ya .mcworld file bhejein!")
-        return
-        
-    file_id = doc["file_id"]
-    send_message(f"Downloading `{file_name}`...")
-    res = requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={file_id}").json()
-    file_path = res["result"]["file_path"]
-    download_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
-    
-    local_zip = os.path.join(BASE_DIR, "uploaded_archive.zip")
-    r = requests.get(download_url, stream=True)
-    with open(local_zip, "wb") as f:
-        for chunk in r.iter_content(chunk_size=8192):
-            f.write(chunk)
-            
-    restore_backup_archive(local_zip)
-    run_cmd(f"rm -f {local_zip}")
-
-HELP_TEXT = """MCPE Master Control Panel (Farm Chunk & Core Suite)
+Emergency Reset & Reinstall:
+• /resetserver - Sabhi files delete karke pehli baar jaisa fresh install aur fresh tunnel setup shuru karein
 
 Farm Chunk Loader (Radius Based):
-1. /loadchunk <X> <Z> <radius> [name] - Center point + radius se charo taraf chunks load karein
-2. /chunklist - Active loaded chunk areas check karein
-3. /removechunk <name> - Specific loaded chunk area delete karein
-4. /removeallchunks - Saare loaded chunk areas clear karein
+1. /loadchunk <X> <Z> <radius> [name] - Load farm chunks 24/7
+2. /chunklist - View active loaded farm chunks
+3. /removechunk <name> - Stop loading specific chunk
+4. /removeallchunks - Remove all active ticking chunk areas
 
 Surveillance & Auto-Ban:
-5. /spy <player> - Lock target for high-rate scan & auto-ban
-6. /unspy <player> - Remove from surveillance
+5. /spy <player> - Auto-scan target & auto-ban
+6. /unspy <player> - Remove target from surveillance
 7. /spylist - Active surveillance list
 8. /banlist - View banned players & reasons
 
 Security Hardening:
-9. /propertyprotection <on|off> - Block break/place lock
-10. /chestlock <on|off> - Container theft lock
-11. /antixray <on|off> - Block custom X-Ray texture packs
-12. /speedhackprotection <on|off> - Movement rewinds & rollback
+9. /propertyprotection <on|off> - Block break/place protection
+10. /chestlock <on|off> - Container theft protection
+11. /antixray <on|off> - Texture pack requirement
+12. /speedhackprotection <on|off> - Movement rollback
 
-Player Punishment & Freeze:
-13. /freeze <player> - Lock player in place permanently
+Player Management & Freeze:
+13. /freeze <player> - Lock player in place
 14. /unfreeze <player> - Remove movement lock
-15. /mute <player> - Block player from chat
-16. /unmute <player> - Allow chat
+15. /mute <player> - Block player chat
+16. /unmute <player> - Unblock player chat
 17. /kill <player> - Kill player
 18. /clearinv <player> - Wipe player inventory
 
-Player Roles & Permissions:
+Roles & Moderation:
 19. /players - List online players
-20. /visitor <player> - Restrict to Visitor
-21. /member <player> - Set to Member
+20. /visitor <player> - Set Visitor role
+21. /member <player> - Set Member role
 22. /op <player> - Grant OP
 23. /deop <player> - Revoke OP
 24. /kick <player> - Kick player
@@ -386,8 +457,8 @@ Whitelist:
 32. /whitelistremove <player> - Remove from whitelist
 
 Gameplay & Environment:
-33. /coords - Toggle coordinates
-34. /keepinventory - Toggle KeepInventory
+33. /coords - Show coordinates
+34. /keepinventory - Enable KeepInventory
 35. /pvp <on|off> - Toggle PVP
 36. /difficulty <peaceful|easy|normal|hard>
 37. /gamemode <survival|creative|adventure>
@@ -399,27 +470,27 @@ Gameplay & Environment:
 
 Chat & Broadcast:
 43. /say <message> - Server broadcast
-44. /clearchat - Clear in-game chat screen
+44. /clearchat - Clear in-game chat
 
 World & Backups:
 45. /seed <number> - Generate world with seed
-46. [Send .zip / .mcworld] - Restore world map (Builds & inventory safe)
-47. /backup - Download full backup zip
+46. [Send .zip / .mcworld] - Restore world (Detailed 5-step progress)
+47. /backup - Generate and download backup zip
 48. /backuplist - View local snapshots (Max 3)
-49. /restoresnapshot <file> - Restore local backup
+49. /restoresnapshot <file> - Restore local snapshot
 
 Maintenance & Diagnostics:
-50. /updateserver [version] - Update server (e.g. /updateserver 1.26.51.1)
+50. /updateserver [version] - Update server (Live steps)
 51. /status - Server & tunnel status
 52. /serverstats - System CPU, RAM & Disk stats
-53. /logs - Live console logs
+53. /logs - Live console output
 54. /restart - Safe restart Bedrock server
 """
 
 def handle_updates():
     offset = 0
     start_server()
-    send_message("Minecraft Guard Online!\nRadius Chunk Loader Active.\nType /help to view controls.")
+    send_message("Minecraft Guard Online!\nComplete Factory Reset & Radius Chunk Loader Active.\nType /help to view commands.")
     
     threading.Thread(target=smart_backup_engine, daemon=True).start()
     threading.Thread(target=sentry_anti_hack, daemon=True).start()
@@ -452,55 +523,52 @@ def handle_updates():
                     send_message(HELP_TEXT)
 
                 # -------------------------------------------------------------
-                # RADIUS BASED CHUNK LOADER
+                # FACTORY RESET & FRESH SETUP HANDLER
                 # -------------------------------------------------------------
+                elif text == "/resetserver":
+                    send_message(
+                        "⚠️ **WARNING: COMPLETE FACTORY RESET!**\n\n"
+                        "Yeh command chalane se:\n"
+                        "1. Saare worlds, custom configs aur server files delete ho jayenge.\n"
+                        "2. Playit tunnel aur tokens naye sire se wipe ho jayenge.\n"
+                        "3. Naya Playit claim link aayega jaise container pehli baar chala tha.\n\n"
+                        "Agar aap sach me sab kuch naya karna chahte hain, toh ye type karein:\n"
+                        "`/resetserver CONFIRM`"
+                    )
+
+                elif text == "/resetserver CONFIRM":
+                    trigger_factory_reset()
+
+                # Chunk loader
                 elif text.startswith("/loadchunk"):
-                    # Usage: /loadchunk <X> <Z> <radius> [name]
-                    # Or with Y: /loadchunk <X> <Y> <Z> <radius> [name]
                     parts = text.split()
                     try:
                         if len(parts) >= 4:
                             if len(parts) == 4 or (len(parts) == 5 and not parts[4].lstrip('-').isdigit()):
-                                # 2D: X Z radius [name]
                                 cx = int(parts[1])
                                 cz = int(parts[2])
                                 rad = int(parts[3])
                                 area_name = parts[4] if len(parts) >= 5 else f"farm_{int(time.time())}"
-                                
                                 x1, x2 = cx - rad, cx + rad
                                 z1, z2 = cz - rad, cz + rad
                                 send_to_console(f"tickingarea add {x1} 0 {z1} {x2} 256 {z2} {area_name}")
                                 time.sleep(0.5)
-                                send_message(
-                                    f"🌾 **Farm Chunk Area Loaded!**\n"
-                                    f"Name: `{area_name}`\n"
-                                    f"Center: `({cx}, {cz})` | Radius: `{rad}` blocks\n"
-                                    f"Range Covered: `({x1}, {z1})` to `({x2}, {z2})`\n"
-                                    f"Yeh poora area 24/7 bina kisi player ke load rahega!"
-                                )
+                                send_message(f"🌾 **Farm Chunk Loaded (Always Active)!**\n• Name: `{area_name}`\n• Center: `({cx}, {cz})` | Radius: `{rad}` blocks\n• Bounded Area: `({x1}, {z1})` to `({x2}, {z2})`")
                             elif len(parts) >= 5:
-                                # 3D: X Y Z radius [name]
                                 cx = int(parts[1])
                                 cy = int(parts[2])
                                 cz = int(parts[3])
                                 rad = int(parts[4])
                                 area_name = parts[5] if len(parts) >= 6 else f"farm_{int(time.time())}"
-                                
                                 x1, x2 = cx - rad, cx + rad
                                 z1, z2 = cz - rad, cz + rad
                                 send_to_console(f"tickingarea add {x1} 0 {z1} {x2} 256 {z2} {area_name}")
                                 time.sleep(0.5)
-                                send_message(
-                                    f"🌾 **Farm Chunk Area Loaded!**\n"
-                                    f"Name: `{area_name}`\n"
-                                    f"Center: `({cx}, {cy}, {cz})` | Radius: `{rad}` blocks\n"
-                                    f"Range Covered: `({x1}, {z1})` to `({x2}, {z2})`\n"
-                                    f"Farms 24/7 background me run honge."
-                                )
+                                send_message(f"🌾 **Farm Chunk Loaded (Always Active)!**\n• Name: `{area_name}`\n• Center: `({cx}, {cy}, {cz})` | Radius: `{rad}` blocks\n• Bounded Area: `({x1}, {z1})` to `({x2}, {z2})`")
                         else:
                             send_message("Usage: `/loadchunk <X> <Z> <radius> [name]`\nExample: `/loadchunk 100 200 30 iron_farm`")
                     except Exception as e:
-                        send_message(f"Input error! Kripya sahi numbers dalein. Details: {e}")
+                        send_message(f"Input error! Details: {e}")
 
                 elif text == "/chunklist":
                     send_to_console("tickingarea list all-dimensions")
@@ -514,13 +582,13 @@ def handle_updates():
 
                 elif text == "/removeallchunks":
                     send_to_console("tickingarea remove_all")
-                    send_message("Saare active loaded chunk areas delete kar diye gaye.")
+                    send_message("Saare active chunk areas delete kar diye gaye.")
 
                 # Surveillance
                 elif text.startswith("/spy "):
                     target = text.split(" ", 1)[1].strip()
                     SPY_TARGETS.add(target)
-                    send_message(f"🎯 Target Locked: `{target}` (Monitored for speed/fly/dupe).")
+                    send_message(f"🎯 Target Locked: `{target}`")
 
                 elif text.startswith("/unspy "):
                     target = text.split(" ", 1)[1].strip()
@@ -543,7 +611,7 @@ def handle_updates():
                             out += f"{idx}. `{e.get('name')}` - {e.get('reason')} ({e.get('date')})\n"
                         send_message(out)
 
-                # Security Hardening
+                # Hardening
                 elif text.startswith("/propertyprotection "):
                     mode = text.split(" ", 1)[1].strip().lower()
                     val = "true" if mode in ["on", "enable", "true"] else "false"
@@ -565,19 +633,19 @@ def handle_updates():
                     update_property("correct-player-movement", val)
                     send_message(f"Speedhack rollback protection: {val}")
 
-                # Freeze, Mute, Penalties
+                # Freeze & Mute
                 elif text.startswith("/freeze "):
                     p = text.split(" ", 1)[1].strip()
                     FROZEN_PLAYERS.add(p)
                     send_to_console(f'effect "{p}" slowness 999999 255 true')
                     send_to_console(f'effect "{p}" jump_boost 999999 200 true')
-                    send_message(f"❄️ Player `{p}` has been FROZEN in place!")
+                    send_message(f"❄️ Player `{p}` FROZEN!")
 
                 elif text.startswith("/unfreeze "):
                     p = text.split(" ", 1)[1].strip()
                     FROZEN_PLAYERS.discard(p)
                     send_to_console(f'effect "{p}" clear')
-                    send_message(f"Player `{p}` is now UNFROZEN.")
+                    send_message(f"Player `{p}` UNFROZEN.")
 
                 elif text.startswith("/mute "):
                     p = text.split(" ", 1)[1].strip()
@@ -599,7 +667,7 @@ def handle_updates():
                     send_to_console(f'clear "{p}"')
                     send_message(f"Cleared inventory: {p}")
 
-                # Roles & Moderation
+                # Moderation
                 elif text == "/players":
                     send_to_console("list")
                     out = read_console_output(6)
@@ -755,7 +823,7 @@ def handle_updates():
                         send_to_console('say ')
                     send_message("In-game chat cleared.")
 
-                # World & Backup Controls
+                # World & Backup
                 elif text.startswith("/seed"):
                     parts = text.split(maxsplit=1)
                     if len(parts) >= 2:
@@ -768,7 +836,7 @@ def handle_updates():
                         send_message(f"New world generated: {new_world} (Seed: {seed_val})")
 
                 elif text == "/backup":
-                    send_message("Backup zip create ho raha hai...")
+                    send_message("Creating backup archive...")
                     timestamp = time.strftime("%Y%m%d_%H%M%S")
                     backup_zip = os.path.join(BACKUP_DIR, f"manual_backup_{timestamp}.zip")
                     run_cmd(f"cd {BASE_DIR} && zip -rq {backup_zip} worlds/ server.properties blacklist.json")
@@ -783,14 +851,14 @@ def handle_updates():
                         for b in backups:
                             sz = os.path.getsize(os.path.join(BACKUP_DIR, b)) // 1024
                             out += f" • `{b}` ({sz} KB)\n"
-                        out += "\nRestore karne ke liye: `/restoresnapshot <filename>`"
+                        out += "\nRestore command: `/restoresnapshot <filename>`"
                         send_message(out)
 
                 elif text.startswith("/restoresnapshot "):
                     snap_name = text.split(" ", 1)[1].strip()
                     target_file = os.path.join(BACKUP_DIR, snap_name)
                     if os.path.exists(target_file):
-                        restore_backup_archive(target_file)
+                        restore_backup_archive(target_file, snap_name)
                     else:
                         send_message(f"Snapshot file `{snap_name}` nahi mili.")
 
